@@ -323,6 +323,12 @@ cat /etc/V2bX/route.json | head -20
 
 # 验证双入站配置
 cat /etc/V2bX/custom_inbound.json | jq 'length'  # 应该返回2（双入站）
+
+# 验证UUID配置
+cat /etc/V2bX/custom_inbound.json | jq '.[1].settings.clients[0].id'
+
+# 测试UUID生成功能
+bash test-uuid-generation.sh
 ```
 
 ### 🧪 测试防偷跑效果
@@ -393,7 +399,36 @@ curl -H "Host: www.cityline.com" https://your-server:443
 curl -H "Host: evil.com" https://your-server:443
 ```
 
-## �📞 故障排除
+## 🔧 UUID配置问题排除
+
+### 常见UUID问题
+1. **UUID为全零**：`00000000-0000-0000-0000-000000000000`
+   - 原因：面板API未返回有效UUID或字段名不匹配
+   - 解决：脚本会自动生成随机UUID，或手动在面板中配置用户
+
+2. **UUID格式错误**
+   - 原因：API返回的UUID格式不标准
+   - 解决：脚本会自动验证并重新生成
+
+3. **API字段名不匹配**
+   - 脚本会显示API响应结构，帮助识别正确的字段名
+   - 支持多种常见字段名：`uuid`、`id`、`users[0].uuid`、`clients[0].id`等
+
+### UUID验证命令
+```bash
+# 检查生成的UUID
+cat /etc/V2bX/custom_inbound.json | jq '.[1].settings.clients[0].id'
+
+# 验证UUID格式
+uuid="your-uuid-here"
+if [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "UUID格式正确"
+else
+    echo "UUID格式错误"
+fi
+```
+
+## 📞 故障排除
 
 ### 路由规则问题
 ```bash

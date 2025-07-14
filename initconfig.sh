@@ -588,6 +588,27 @@ EOF
         local node_response=$(curl -s "${api_host}/api/v1/server/UniProxy/config?token=${api_key}&node_id=${node_id}&node_type=vless" --connect-timeout 30 2>/dev/null)
 
         if [ $? -eq 0 ] && [ -n "$node_response" ]; then
+            # 调试：显示API响应结构（仅显示字段名，不显示敏感值）
+            echo -e "${yellow}API响应字段：${plain}"
+            if command -v python3 >/dev/null 2>&1; then
+                echo "$node_response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    def show_keys(obj, prefix=''):
+        if isinstance(obj, dict):
+            for key in obj.keys():
+                print(f'  {prefix}{key}')
+                if isinstance(obj[key], dict):
+                    show_keys(obj[key], prefix + '  ')
+                elif isinstance(obj[key], list) and obj[key] and isinstance(obj[key][0], dict):
+                    print(f'  {prefix}  [0]:')
+                    show_keys(obj[key][0], prefix + '    ')
+    show_keys(data)
+except:
+    print('  无法解析JSON结构')
+" 2>/dev/null
+            fi
             # 解析完整的REALITY配置信息
             local server_port=""
             local server_name=""
@@ -600,27 +621,63 @@ EOF
             if command -v python3 >/dev/null 2>&1; then
                 # 使用Python解析JSON获取完整REALITY配置
                 eval $(echo "$node_response" | python3 -c "
-import sys, json
+import sys, json, uuid as uuid_module
 try:
     data = json.load(sys.stdin)
 
     # 基本配置
     server_port = data.get('server_port', 443)
 
-    # REALITY配置
-    reality_settings = data.get('reality_settings', {})
-    tls_settings = data.get('tls_settings', {})
+    # REALITY配置 - 尝试多种可能的字段名
+    reality_settings = data.get('reality_settings', {}) or data.get('realitySettings', {})
+    tls_settings = data.get('tls_settings', {}) or data.get('tlsSettings', {})
+    stream_settings = data.get('stream_settings', {}) or data.get('streamSettings', {})
 
     # 提取REALITY参数
-    server_name = reality_settings.get('server_name') or tls_settings.get('server_name', 'speed.cloudflare.com')
-    dest = reality_settings.get('dest', f'{server_name}:443')
-    private_key = reality_settings.get('private_key', '')
-    short_ids = reality_settings.get('short_ids', ['', '0123456789abcdef'])
-    server_names = reality_settings.get('server_names', [server_name])
+    server_name = (reality_settings.get('server_name') or
+                  reality_settings.get('serverName') or
+                  tls_settings.get('server_name') or
+                  tls_settings.get('serverName') or
+                  'speed.cloudflare.com')
 
-    # 用户配置
-    users = data.get('users', [])
-    uuid = users[0].get('uuid', '') if users else ''
+    dest = (reality_settings.get('dest') or
+           reality_settings.get('destination') or
+           f'{server_name}:443')
+
+    private_key = (reality_settings.get('private_key') or
+                  reality_settings.get('privateKey') or
+                  reality_settings.get('key') or '')
+
+    short_ids = (reality_settings.get('short_ids') or
+                reality_settings.get('shortIds') or
+                reality_settings.get('shortId') or
+                ['', '0123456789abcdef'])
+
+    server_names = (reality_settings.get('server_names') or
+                   reality_settings.get('serverNames') or
+                   [server_name])
+
+    # 用户配置 - 尝试多种可能的字段名和结构
+    uuid = ''
+
+    # 尝试不同的UUID字段位置
+    if 'users' in data and data['users']:
+        uuid = data['users'][0].get('uuid', '') or data['users'][0].get('id', '')
+    elif 'clients' in data and data['clients']:
+        uuid = data['clients'][0].get('uuid', '') or data['clients'][0].get('id', '')
+    elif 'user' in data:
+        uuid = data['user'].get('uuid', '') or data['user'].get('id', '')
+    elif 'client' in data:
+        uuid = data['client'].get('uuid', '') or data['client'].get('id', '')
+    elif 'uuid' in data:
+        uuid = data['uuid']
+    elif 'id' in data:
+        uuid = data['id']
+
+    # 如果仍然没有UUID，生成一个随机UUID
+    if not uuid:
+        uuid = str(uuid_module.uuid4())
+        print(f'# 生成随机UUID: {uuid}', file=sys.stderr)
 
     # 输出shell变量
     print(f'server_port={server_port}')
@@ -630,16 +687,26 @@ try:
     print(f'dest=\"{dest}\"')
 
     # 处理数组
-    short_ids_str = ','.join([f'\"{sid}\"' for sid in short_ids])
-    server_names_str = ','.join([f'\"{sn}\"' for sn in server_names])
+    if isinstance(short_ids, list):
+        short_ids_str = ','.join([f'\"{sid}\"' for sid in short_ids])
+    else:
+        short_ids_str = f'\"{short_ids}\"'
+
+    if isinstance(server_names, list):
+        server_names_str = ','.join([f'\"{sn}\"' for sn in server_names])
+    else:
+        server_names_str = f'\"{server_names}\"'
+
     print(f'short_ids_array=({short_ids_str})')
     print(f'server_names_array=({server_names_str})')
 
 except Exception as e:
-    print(f'# API解析失败: {e}', file=sys.stderr)
+    import uuid as uuid_module
+    random_uuid = str(uuid_module.uuid4())
+    print(f'# API解析失败: {e}，使用随机UUID', file=sys.stderr)
     print('server_port=443')
     print('server_name=\"speed.cloudflare.com\"')
-    print('uuid=\"\"')
+    print(f'uuid=\"{random_uuid}\"')
     print('private_key=\"\"')
     print('dest=\"speed.cloudflare.com:443\"')
     print('short_ids_array=(\"\" \"0123456789abcdef\")')
@@ -649,12 +716,21 @@ except Exception as e:
                 # 备用grep解析方法（基本配置）
                 server_port=$(echo "$node_response" | grep -o '"server_port":[0-9]*' | cut -d':' -f2 | head -1)
                 server_name=$(echo "$node_response" | grep -o '"server_name":"[^"]*"' | cut -d'"' -f4 | head -1)
+
+                # 尝试多种UUID字段名
                 uuid=$(echo "$node_response" | grep -o '"uuid":"[^"]*"' | cut -d'"' -f4 | head -1)
+                if [ -z "$uuid" ]; then
+                    uuid=$(echo "$node_response" | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | head -1)
+                fi
 
                 # 设置默认值
                 if [ -z "$server_port" ]; then server_port=443; fi
                 if [ -z "$server_name" ]; then server_name="speed.cloudflare.com"; fi
-                if [ -z "$uuid" ]; then uuid=""; fi
+                if [ -z "$uuid" ]; then
+                    # 生成随机UUID而不是使用全零
+                    uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(openssl rand -hex 16 | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1\2\3\4-\5\6-\7\8-\9\10-\11\12\13\14\15\16/')")
+                    echo -e "${yellow}生成随机UUID: ${uuid:0:8}...${plain}"
+                fi
                 dest="${server_name}:443"
                 private_key=""
                 short_ids_array=("" "0123456789abcdef")
@@ -663,10 +739,10 @@ except Exception as e:
                 echo -e "${yellow}使用grep解析，REALITY配置可能不完整${plain}"
             fi
 
-            # 验证关键配置
-            if [ -z "$uuid" ]; then
-                echo -e "${red}警告：未获取到用户UUID，请检查面板配置${plain}"
-                uuid="00000000-0000-0000-0000-000000000000"
+            # 验证UUID格式
+            if [[ ! "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                echo -e "${red}警告：UUID格式不正确，生成新的随机UUID${plain}"
+                uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(openssl rand -hex 16 | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1\2\3\4-\5\6-\7\8-\9\10-\11\12\13\14\15\16/')")
             fi
 
             if [ -z "$private_key" ]; then
