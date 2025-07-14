@@ -72,8 +72,40 @@ add_node_config() {
         esac
     fi
     fastopen=true
+    enable_reality_antisteal=false
+    reality_internal_port=4431
+
     if [ "$NodeType" == "vless" ]; then
         read -rp "请选择是否为reality节点？(y/n)" isreality
+
+        # 新增：防偷跑选项
+        if [[ "$isreality" == "y" || "$isreality" == "Y" ]]; then
+            echo -e "${yellow}检测到REALITY节点！${plain}"
+            echo -e "${green}是否启用防偷跑功能？${plain}"
+            echo -e "${yellow}防偷跑功能说明：${plain}"
+            echo -e "  - 防止非法扫描和流量偷跑"
+            echo -e "  - 使用双入站+路由过滤机制"
+            echo -e "  - 只允许匹配serverNames的合法请求"
+            echo -e "  - 其他请求将被阻断"
+            echo ""
+            read -rp "是否启用REALITY防偷跑？(y/n): " enable_anti_steal
+
+            if [[ "$enable_anti_steal" =~ ^[Yy]$ ]]; then
+                enable_reality_antisteal=true
+                echo -e "${green}已启用REALITY防偷跑功能${plain}"
+
+                read -rp "请输入REALITY内网端口 (默认4431): " input_port
+                if [[ -n "$input_port" && "$input_port" =~ ^[0-9]+$ ]]; then
+                    reality_internal_port=$input_port
+                fi
+
+                echo -e "${green}防偷跑配置：${plain}"
+                echo -e "  - 内网端口：$reality_internal_port"
+                echo -e "  - 路由过滤：启用"
+            else
+                echo -e "${yellow}使用标准REALITY配置${plain}"
+            fi
+        fi
     elif [ "$NodeType" == "hysteria" ] || [ "$NodeType" == "hysteria2" ] || [ "$NodeType" == "tuic" ] || [ "$NodeType" == "anytls" ]; then
         fastopen=false
         istls="y"
@@ -106,8 +138,14 @@ add_node_config() {
     if [ "$ipv6_support" -eq 1 ]; then
         listen_ip="::"
     fi
+
+    # 为启用防偷跑的REALITY节点设置本地监听
+    if [ "$enable_reality_antisteal" = true ]; then
+        listen_ip="::1"
+    fi
+
     node_config=""
-    if [ "$core_type" == "1" ]; then 
+    if [ "$core_type" == "1" ]; then
     node_config=$(cat <<EOF
 {
             "Core": "$core",
@@ -116,7 +154,7 @@ add_node_config() {
             "NodeID": $NodeID,
             "NodeType": "$NodeType",
             "Timeout": 30,
-            "ListenIP": "0.0.0.0",
+            "ListenIP": "$listen_ip",
             "SendIP": "0.0.0.0",
             "DeviceOnlineMinTraffic": 200,
             "EnableProxyProtocol": false,
@@ -498,6 +536,211 @@ acl:
 masquerade:
   type: 404
 EOF
+
+    # 生成防偷跑配置（如果启用）
+    generate_reality_antisteal_config
+
     echo -e "${green}V2bX 配置文件生成完成,正在重新启动服务${plain}"
     v2bx restart
+}
+
+# 生成防偷跑配置函数
+generate_reality_antisteal_config() {
+    # 检查是否有启用防偷跑的节点
+    local has_antisteal=false
+    local antisteal_nodes=()
+
+    # 检查全局变量
+    if [ "$enable_reality_antisteal" = true ]; then
+        has_antisteal=true
+        antisteal_nodes+=("$NodeID|$ApiHost|$ApiKey|$reality_internal_port")
+    fi
+
+    if [ "$has_antisteal" = false ]; then
+        return 0
+    fi
+
+    echo -e "${yellow}正在生成防偷跑配置...${plain}"
+
+    # 确保 xray 核心配置包含 InboundConfigPath
+    if ! grep -q "InboundConfigPath" /etc/V2bX/config.json; then
+        echo -e "${yellow}正在更新 xray 核心配置以支持防偷跑...${plain}"
+
+        # 使用 Python3 或 sed 来更新配置
+        if command -v python3 >/dev/null 2>&1; then
+            python3 << 'EOF'
+import json
+import sys
+
+try:
+    with open('/etc/V2bX/config.json', 'r') as f:
+        config = json.load(f)
+
+    # 更新 xray 核心配置
+    for core in config.get('Cores', []):
+        if core.get('Type') == 'xray':
+            core['InboundConfigPath'] = '/etc/V2bX/custom_inbound.json'
+            break
+
+    with open('/etc/V2bX/config.json', 'w') as f:
+        json.dump(config, f, indent=4)
+
+    print("xray 核心配置更新成功")
+
+except Exception as e:
+    print(f"更新配置失败: {e}", file=sys.stderr)
+    sys.exit(1)
+EOF
+        else
+            echo -e "${yellow}未安装 Python3，请手动在 /etc/V2bX/config.json 的 xray 核心配置中添加：${plain}"
+            echo -e '  "InboundConfigPath": "/etc/V2bX/custom_inbound.json"'
+        fi
+    fi
+
+    # 生成防偷跑的 custom_inbound.json
+    local custom_inbound_content="["
+    local first_inbound=true
+
+    for node_info in "${antisteal_nodes[@]}"; do
+        IFS='|' read -r node_id api_host api_key internal_port <<< "$node_info"
+
+        echo -e "${yellow}正在获取节点 $node_id 的配置信息...${plain}"
+
+        # 从API获取节点配置
+        local node_response=$(curl -s "${api_host}/api/v1/server/UniProxy/config?token=${api_key}&node_id=${node_id}&node_type=vless" --connect-timeout 30 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ -n "$node_response" ]; then
+            # 解析配置信息
+            local server_port=""
+            local server_name=""
+
+            if command -v python3 >/dev/null 2>&1; then
+                # 使用Python解析JSON
+                server_port=$(echo "$node_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('server_port', 443))" 2>/dev/null || echo "443")
+                server_name=$(echo "$node_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('tls_settings', {}).get('server_name', 'example.com'))" 2>/dev/null || echo "example.com")
+            else
+                # 使用grep和sed进行简单解析
+                server_port=$(echo "$node_response" | grep -o '"server_port":[0-9]*' | cut -d':' -f2 | head -1)
+                server_name=$(echo "$node_response" | grep -o '"server_name":"[^"]*"' | cut -d'"' -f4 | head -1)
+            fi
+
+            # 设置默认值
+            if [ -z "$server_port" ]; then server_port=443; fi
+            if [ -z "$server_name" ]; then server_name="example.com"; fi
+
+            # 添加逗号分隔符
+            if [ "$first_inbound" = false ]; then
+                custom_inbound_content+=","
+            fi
+            first_inbound=false
+
+            # 生成dokodemo-door入站配置
+            custom_inbound_content+="
+        {
+            \"tag\": \"dokodemo-antisteal-${node_id}\",
+            \"port\": ${server_port},
+            \"protocol\": \"dokodemo-door\",
+            \"settings\": {
+                \"address\": \"::1\",
+                \"port\": ${internal_port},
+                \"network\": \"tcp\"
+            },
+            \"sniffing\": {
+                \"enabled\": true,
+                \"destOverride\": [\"tls\"],
+                \"routeOnly\": true
+            }
+        }"
+
+            echo -e "${green}节点 $node_id 防偷跑配置生成成功${plain}"
+            echo -e "  - 外部端口：$server_port"
+            echo -e "  - 内网端口：$internal_port"
+            echo -e "  - 服务器名：$server_name"
+
+            # 添加防偷跑路由规则
+            add_antisteal_routing_rules "$node_id" "$server_name"
+        else
+            echo -e "${red}获取节点 $node_id 配置失败，跳过防偷跑配置${plain}"
+        fi
+    done
+
+    custom_inbound_content+="
+    ]"
+
+    # 写入custom_inbound.json文件
+    echo "$custom_inbound_content" > /etc/V2bX/custom_inbound.json
+
+    echo -e "${green}防偷跑配置生成完成！${plain}"
+    echo -e "${yellow}配置说明：${plain}"
+    echo -e "  - 防偷跑入站：/etc/V2bX/custom_inbound.json"
+    echo -e "  - 路由规则：/etc/V2bX/route.json"
+    echo ""
+    echo -e "${yellow}防偷跑原理：${plain}"
+    echo -e "  1. dokodemo-door监听外部端口"
+    echo -e "  2. 转发到V2bX生成的REALITY入站（内网端口）"
+    echo -e "  3. 路由规则：只允许匹配serverNames的域名，其他阻断"
+}
+
+# 添加防偷跑路由规则
+add_antisteal_routing_rules() {
+    local node_id=$1
+    local server_name=$2
+
+    # 读取现有的route.json
+    local route_file="/etc/V2bX/route.json"
+    local temp_file="/tmp/route_temp.json"
+
+    if [ -f "$route_file" ]; then
+        # 在现有规则前添加防偷跑规则
+        if command -v python3 >/dev/null 2>&1; then
+            python3 << EOF
+import json
+import sys
+
+try:
+    with open('$route_file', 'r') as f:
+        route_config = json.load(f)
+
+    # 确保rules数组存在
+    if 'rules' not in route_config:
+        route_config['rules'] = []
+
+    # 添加防偷跑规则到规则列表开头
+    antisteal_rules = [
+        {
+            "type": "field",
+            "inboundTag": ["dokodemo-antisteal-$node_id"],
+            "domain": ["$server_name"],
+            "outboundTag": "direct"
+        },
+        {
+            "type": "field",
+            "inboundTag": ["dokodemo-antisteal-$node_id"],
+            "outboundTag": "block"
+        }
+    ]
+
+    # 将防偷跑规则插入到开头
+    route_config['rules'] = antisteal_rules + route_config['rules']
+
+    with open('$temp_file', 'w') as f:
+        json.dump(route_config, f, indent=4)
+
+except Exception as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
+EOF
+
+            if [ $? -eq 0 ]; then
+                mv "$temp_file" "$route_file"
+                echo -e "${green}节点 $node_id 防偷跑路由规则添加成功${plain}"
+            else
+                echo -e "${red}节点 $node_id 防偷跑路由规则添加失败${plain}"
+            fi
+        else
+            echo -e "${yellow}未安装Python3，请手动在 $route_file 中添加以下规则：${plain}"
+            echo -e "  - 允许 $server_name 域名通过 dokodemo-antisteal-$node_id"
+            echo -e "  - 阻断其他通过 dokodemo-antisteal-$node_id 的请求"
+        fi
+    fi
 }
