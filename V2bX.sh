@@ -728,6 +728,13 @@ EOF
     cat <<EOF > /etc/V2bX/custom_outbound.json
     [
         {
+            "tag": "direct",
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv4v6"
+            }
+        },
+        {
             "tag": "IPv4_out",
             "protocol": "freedom",
             "settings": {

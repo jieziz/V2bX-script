@@ -139,9 +139,14 @@ add_node_config() {
         listen_ip="::"
     fi
 
-    # 为启用防偷跑的REALITY节点设置本地监听
+    # 为启用防偷跑的REALITY节点设置特殊配置
     if [ "$enable_reality_antisteal" = true ]; then
         listen_ip="::1"
+        # 当启用防偷跑时，将节点类型改为shadowsocks以避免V2bX自动生成REALITY入站
+        # 因为我们会在custom_inbound.json中生成完整的REALITY配置
+        original_node_type="$NodeType"
+        NodeType="shadowsocks"
+        echo -e "${yellow}防偷跑模式：禁用V2bX自动REALITY入站生成${plain}"
     fi
 
     node_config=""
@@ -354,6 +359,13 @@ EOF
     # 创建 custom_outbound.json 文件
     cat <<EOF > /etc/V2bX/custom_outbound.json
 [
+    {
+        "tag": "direct",
+        "protocol": "freedom",
+        "settings": {
+            "domainStrategy": "UseIPv4v6"
+        }
+    },
     {
         "tag": "IPv4_out",
         "protocol": "freedom",
@@ -571,27 +583,112 @@ EOF
 
         echo -e "${yellow}正在获取节点 $node_id 的配置信息...${plain}"
 
-        # 从API获取节点配置
+        # 从API获取完整的REALITY节点配置
+        echo -e "${yellow}正在获取完整的REALITY配置...${plain}"
         local node_response=$(curl -s "${api_host}/api/v1/server/UniProxy/config?token=${api_key}&node_id=${node_id}&node_type=vless" --connect-timeout 30 2>/dev/null)
 
         if [ $? -eq 0 ] && [ -n "$node_response" ]; then
-            # 解析配置信息
+            # 解析完整的REALITY配置信息
             local server_port=""
             local server_name=""
+            local uuid=""
+            local private_key=""
+            local short_ids=""
+            local dest=""
+            local server_names=""
 
             if command -v python3 >/dev/null 2>&1; then
-                # 使用Python解析JSON
-                server_port=$(echo "$node_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('server_port', 443))" 2>/dev/null || echo "443")
-                server_name=$(echo "$node_response" | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('tls_settings', {}).get('server_name', 'example.com'))" 2>/dev/null || echo "example.com")
+                # 使用Python解析JSON获取完整REALITY配置
+                eval $(echo "$node_response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+
+    # 基本配置
+    server_port = data.get('server_port', 443)
+
+    # REALITY配置
+    reality_settings = data.get('reality_settings', {})
+    tls_settings = data.get('tls_settings', {})
+
+    # 提取REALITY参数
+    server_name = reality_settings.get('server_name') or tls_settings.get('server_name', 'speed.cloudflare.com')
+    dest = reality_settings.get('dest', f'{server_name}:443')
+    private_key = reality_settings.get('private_key', '')
+    short_ids = reality_settings.get('short_ids', ['', '0123456789abcdef'])
+    server_names = reality_settings.get('server_names', [server_name])
+
+    # 用户配置
+    users = data.get('users', [])
+    uuid = users[0].get('uuid', '') if users else ''
+
+    # 输出shell变量
+    print(f'server_port={server_port}')
+    print(f'server_name=\"{server_name}\"')
+    print(f'uuid=\"{uuid}\"')
+    print(f'private_key=\"{private_key}\"')
+    print(f'dest=\"{dest}\"')
+
+    # 处理数组
+    short_ids_str = ','.join([f'\"{sid}\"' for sid in short_ids])
+    server_names_str = ','.join([f'\"{sn}\"' for sn in server_names])
+    print(f'short_ids_array=({short_ids_str})')
+    print(f'server_names_array=({server_names_str})')
+
+except Exception as e:
+    print(f'# API解析失败: {e}', file=sys.stderr)
+    print('server_port=443')
+    print('server_name=\"speed.cloudflare.com\"')
+    print('uuid=\"\"')
+    print('private_key=\"\"')
+    print('dest=\"speed.cloudflare.com:443\"')
+    print('short_ids_array=(\"\" \"0123456789abcdef\")')
+    print('server_names_array=(\"speed.cloudflare.com\")')
+" 2>/dev/null)
             else
-                # 使用grep和sed进行简单解析
+                # 备用grep解析方法（基本配置）
                 server_port=$(echo "$node_response" | grep -o '"server_port":[0-9]*' | cut -d':' -f2 | head -1)
                 server_name=$(echo "$node_response" | grep -o '"server_name":"[^"]*"' | cut -d'"' -f4 | head -1)
+                uuid=$(echo "$node_response" | grep -o '"uuid":"[^"]*"' | cut -d'"' -f4 | head -1)
+
+                # 设置默认值
+                if [ -z "$server_port" ]; then server_port=443; fi
+                if [ -z "$server_name" ]; then server_name="speed.cloudflare.com"; fi
+                if [ -z "$uuid" ]; then uuid=""; fi
+                dest="${server_name}:443"
+                private_key=""
+                short_ids_array=("" "0123456789abcdef")
+                server_names_array=("$server_name")
+
+                echo -e "${yellow}使用grep解析，REALITY配置可能不完整${plain}"
             fi
 
-            # 设置默认值
-            if [ -z "$server_port" ]; then server_port=443; fi
-            if [ -z "$server_name" ]; then server_name="example.com"; fi
+            # 验证关键配置
+            if [ -z "$uuid" ]; then
+                echo -e "${red}警告：未获取到用户UUID，请检查面板配置${plain}"
+                uuid="00000000-0000-0000-0000-000000000000"
+            fi
+
+            if [ -z "$private_key" ]; then
+                echo -e "${yellow}警告：未获取到REALITY私钥，将使用示例密钥${plain}"
+                private_key="your-private-key-here"
+            fi
+
+            # 生成short_ids JSON数组
+            local short_ids_json="["
+            for i in "${!short_ids_array[@]}"; do
+                if [ $i -gt 0 ]; then short_ids_json+=","; fi
+                short_ids_json+="\"${short_ids_array[$i]}\""
+            done
+            short_ids_json+="]"
+
+            # 生成server_names JSON数组
+            local server_names_json="["
+            for i in "${!server_names_array[@]}"; do
+                if [ $i -gt 0 ]; then server_names_json+=","; fi
+                server_names_json+="\"${server_names_array[$i]}\""
+            done
+            server_names_json+="]"
 
             # 添加逗号分隔符
             if [ "$first_inbound" = false ]; then
@@ -599,7 +696,7 @@ EOF
             fi
             first_inbound=false
 
-            # 生成dokodemo-door入站配置
+            # 生成完整的双入站配置
             custom_inbound_content+="
         {
             \"tag\": \"dokodemo-antisteal-${node_id}\",
@@ -615,15 +712,53 @@ EOF
                 \"destOverride\": [\"tls\"],
                 \"routeOnly\": true
             }
+        },
+        {
+            \"tag\": \"vless-reality-antisteal-${node_id}\",
+            \"listen\": \"::1\",
+            \"port\": ${internal_port},
+            \"protocol\": \"vless\",
+            \"settings\": {
+                \"clients\": [
+                    {
+                        \"id\": \"${uuid}\"
+                    }
+                ],
+                \"decryption\": \"none\"
+            },
+            \"streamSettings\": {
+                \"network\": \"tcp\",
+                \"security\": \"reality\",
+                \"realitySettings\": {
+                    \"dest\": \"${dest}\",
+                    \"serverNames\": ${server_names_json},
+                    \"privateKey\": \"${private_key}\",
+                    \"shortIds\": ${short_ids_json}
+                }
+            },
+            \"sniffing\": {
+                \"enabled\": true,
+                \"destOverride\": [
+                    \"http\",
+                    \"tls\",
+                    \"quic\"
+                ],
+                \"routeOnly\": true
+            }
         }"
 
-            echo -e "${green}节点 $node_id 防偷跑配置生成成功${plain}"
+            echo -e "${green}节点 $node_id 完整防偷跑配置生成成功${plain}"
             echo -e "  - 外部端口：$server_port"
             echo -e "  - 内网端口：$internal_port"
             echo -e "  - 服务器名：$server_name"
+            echo -e "  - UUID：${uuid:0:8}..."
+            echo -e "  - 目标地址：$dest"
+            echo -e "  - 私钥状态：$([ -n "$private_key" ] && [ "$private_key" != "your-private-key-here" ] && echo "已配置" || echo "需要配置")"
 
-            # 添加防偷跑路由规则
-            add_antisteal_routing_rules "$node_id" "$server_name"
+            # 添加防偷跑路由规则（使用所有server_names）
+            for server_name_item in "${server_names_array[@]}"; do
+                add_antisteal_routing_rules "$node_id" "$server_name_item"
+            done
         else
             echo -e "${red}获取节点 $node_id 配置失败，跳过防偷跑配置${plain}"
         fi
@@ -635,15 +770,30 @@ EOF
     # 写入custom_inbound.json文件
     echo "$custom_inbound_content" > /etc/V2bX/custom_inbound.json
 
-    echo -e "${green}防偷跑配置生成完成！${plain}"
-    echo -e "${yellow}配置说明：${plain}"
-    echo -e "  - 防偷跑入站：/etc/V2bX/custom_inbound.json"
-    echo -e "  - 路由规则：/etc/V2bX/route.json"
+    echo -e "${green}完整防偷跑配置生成完成！${plain}"
     echo ""
-    echo -e "${yellow}防偷跑原理：${plain}"
-    echo -e "  1. dokodemo-door监听外部端口"
-    echo -e "  2. 转发到V2bX生成的REALITY入站（内网端口）"
-    echo -e "  3. 路由规则：只允许匹配serverNames的域名，其他阻断"
+    echo -e "${yellow}=== 防偷跑配置说明 ===${plain}"
+    echo -e "${green}配置文件：${plain}"
+    echo -e "  - 防偷跑入站：/etc/V2bX/custom_inbound.json（完整双入站配置）"
+    echo -e "  - 路由规则：/etc/V2bX/route.json"
+    echo -e "  - 出站配置：/etc/V2bX/custom_outbound.json"
+    echo ""
+    echo -e "${green}防偷跑架构：${plain}"
+    echo -e "  1. dokodemo-door监听外部端口（如443）"
+    echo -e "  2. 转发到完整的VLESS+REALITY入站（内网端口）"
+    echo -e "  3. 路由规则：只允许匹配serverNames的域名通过"
+    echo -e "  4. 其他请求被阻断，防止流量偷跑"
+    echo ""
+    echo -e "${green}关键改进：${plain}"
+    echo -e "  ✅ 完整的REALITY配置（包含streamSettings）"
+    echo -e "  ✅ 从面板API获取真实的REALITY参数"
+    echo -e "  ✅ 双入站架构，完全自主控制"
+    echo -e "  ✅ 避免与V2bX自动生成冲突"
+    echo ""
+    echo -e "${yellow}重要提醒：${plain}"
+    echo -e "  - 请确保面板中已正确配置REALITY参数"
+    echo -e "  - 如果私钥显示'需要配置'，请在面板中生成REALITY密钥"
+    echo -e "  - 重启V2bX后防偷跑功能即可生效"
 }
 
 # 添加防偷跑路由规则

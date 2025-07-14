@@ -81,6 +81,13 @@ Find the source code here: [InazumaV/V2bX](https://github.com/InazumaV/V2bX)
                                             (端口4431)   (block)
 ```
 
+### 完整配置示例
+参考 `reality-antisteal-config-example.json` 文件，包含：
+- **dokodemo-door入站**：监听外部端口443，转发到内网4431
+- **完整VLESS+REALITY入站**：监听内网端口4431，包含完整streamSettings配置
+- **路由规则**：只允许匹配serverNames的域名通过，其他阻断
+- **🎯 重大改进**：从面板API获取真实REALITY参数，生成完整双入站配置
+
 ## 🚀 一键安装
 
 ```bash
@@ -137,7 +144,7 @@ bash initconfig.sh
 }
 ```
 
-### custom_inbound.json（防偷跑入站）
+### custom_inbound.json（完整双入站防偷跑配置）
 ```json
 [
     {
@@ -152,6 +159,31 @@ bash initconfig.sh
         "sniffing": {
             "enabled": true,
             "destOverride": ["tls"],
+            "routeOnly": true
+        }
+    },
+    {
+        "tag": "vless-reality-antisteal-33",
+        "listen": "::1",
+        "port": 4431,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{"id": "从面板API获取的真实UUID"}],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "dest": "从面板API获取",
+                "serverNames": ["从面板API获取"],
+                "privateKey": "从面板API获取",
+                "shortIds": ["从面板API获取"]
+            }
+        },
+        "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls", "quic"],
             "routeOnly": true
         }
     }
@@ -248,54 +280,61 @@ route.json → 直接作为 Xray 的 routing 配置
    - 提供详细的防偷跑功能说明
    - 询问 REALITY 内网端口（默认4431）
 
-2. **修改 ListenIP 设置**（第136-147行）
+2. **修改 ListenIP 设置**（第142-150行）
    - 为启用防偷跑的 REALITY 节点设置本地监听 `::1`
+   - 防偷跑模式下禁用V2bX自动REALITY入站生成
 
-3. **新增防偷跑配置生成函数**（第547-746行）
-   - `generate_reality_antisteal_config()`: 主配置生成函数
+3. **🎯 重大架构改进：完整双入站配置**（第581-796行）
+   - **增强API获取**：从面板获取完整REALITY参数（privateKey、shortIds、serverNames、dest、uuid）
+   - **完整入站生成**：生成包含完整streamSettings的VLESS+REALITY入站
+   - **架构独立**：不依赖V2bX自动生成，完全自主控制防偷跑配置
+   - `generate_reality_antisteal_config()`: 完整配置生成函数
    - `add_antisteal_routing_rules()`: 路由规则添加函数
 
 ### 智能功能特性
 
-#### 1. API 自动集成
-- 自动从面板 API 获取节点配置（server_port, server_name）
-- 支持 Python3 和 grep/sed 两种 JSON 解析方式
-- 完善的错误处理和回退机制
+#### 1. 🚀 完整API集成
+- **完整REALITY配置获取**：从面板API获取privateKey、shortIds、serverNames、dest、uuid等完整参数
+- **双重解析支持**：Python3优先，grep/sed备用的JSON解析方式
+- **完善错误处理**：API失败时使用安全默认值，详细状态提示
 
-#### 2. 配置自动管理
-- 自动检测并更新 xray 核心配置添加 `InboundConfigPath`
-- 智能更新现有 route.json，防偷跑规则优先级处理
-- 自动生成 custom_inbound.json 防偷跑入站配置
+#### 2. 🏗️ 架构独立设计
+- **完整双入站配置**：custom_inbound.json包含dokodemo-door + 完整VLESS+REALITY入站
+- **冲突避免机制**：防偷跑模式下智能禁用V2bX自动REALITY生成
+- **自主配置控制**：不依赖V2bX内部实现，完全可控的防偷跑配置
 
-#### 3. 用户体验优化
-- 在现有配置生成流程中自然集成防偷跑选项
-- 不破坏原有的交互逻辑
-- 提供详细的功能说明和配置原理
+#### 3. 🎯 用户体验优化
+- **无缝集成**：在现有配置流程中自然集成防偷跑选项
+- **详细状态显示**：配置生成过程中显示UUID、私钥状态等关键信息
+- **完整文档说明**：提供防偷跑原理、配置文件说明和验证方法
 
 ## 🛠️ 验证和测试
 
-### 功能验证
+### 🔧 功能验证
 ```bash
-# 检查新增函数
+# 检查防偷跑配置生成
 grep -n "generate_reality_antisteal_config" initconfig.sh
-grep -n "add_antisteal_routing_rules" initconfig.sh
-
-# 检查防偷跑选项
-grep -n "是否启用防偷跑功能" initconfig.sh
+grep -n "完整的REALITY配置" initconfig.sh
 
 # 检查配置文件
 cat /etc/V2bX/config.json | grep InboundConfigPath
-cat /etc/V2bX/custom_inbound.json
+cat /etc/V2bX/custom_inbound.json | jq '.[1].streamSettings.realitySettings'
 cat /etc/V2bX/route.json | head -20
+
+# 验证双入站配置
+cat /etc/V2bX/custom_inbound.json | jq 'length'  # 应该返回2（双入站）
 ```
 
-### 测试防偷跑效果
+### 🧪 测试防偷跑效果
 ```bash
 # 测试合法请求（应该成功）
-curl -H "Host: www.cityline.com" https://your-server:443
+curl -H "Host: speed.cloudflare.com" https://your-server:443
 
 # 测试非法请求（应该被阻断）
 curl -H "Host: evil.com" https://your-server:443
+
+# 检查REALITY配置完整性
+cat /etc/V2bX/custom_inbound.json | jq '.[1].streamSettings.realitySettings | keys'
 ```
 
 ## 🎯 与原版对比
