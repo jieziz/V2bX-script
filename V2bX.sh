@@ -755,7 +755,7 @@ EOF
     ]
 EOF
     
-    # 创建 route.json 文件 - 精简版（只保留3个核心安全规则）
+    # 创建 route.json 文件 - 精简版（只保留核心安全规则）
     cat <<EOF > /etc/V2bX/route.json
     {
         "domainStrategy": "IPIfNonMatch",
@@ -764,9 +764,7 @@ EOF
                 "type": "field",
                 "outboundTag": "block",
                 "domain": [
-                    "geosite:malware",
-                    "geosite:phishing",
-                    "geosite:cryptominers"
+                    "geosite:category-ads-all"
                 ]
             },
             {
@@ -829,9 +827,7 @@ EOF
     "rules": [
       {
         "geosite": [
-          "malware",
-          "phishing",
-          "cryptominers"
+          "category-ads-all"
         ],
         "outbound": "block"
       },

@@ -40,9 +40,7 @@ Find the source code here: [InazumaV/V2bX](https://github.com/InazumaV/V2bX)
             "type": "field",
             "outboundTag": "block",
             "domain": [
-                "geosite:malware",      // 恶意软件域名（自动更新）
-                "geosite:phishing",     // 钓鱼网站域名（自动更新）
-                "geosite:cryptominers"  // 加密货币挖矿域名（自动更新）
+                "geosite:category-ads-all"  // 广告域名（自动更新）
             ]
         },
         {
@@ -211,7 +209,7 @@ bash initconfig.sh
         {
             "type": "field",
             "outboundTag": "block",
-            "domain": ["geosite:malware", "geosite:phishing", "geosite:cryptominers"]
+            "domain": ["geosite:category-ads-all"]
         },
         {
             "type": "field",
@@ -239,7 +237,7 @@ bash initconfig.sh
 - ✅ **消除误杀问题**：不再阻断淘宝、银行等正常网站
 - ✅ **自动威胁更新**：geosite数据库自动更新最新威胁情报
 - ✅ **维护成本降低**：无需手动维护复杂正则表达式
-- ✅ **精确安全防护**：恶意软件、钓鱼网站、挖矿网站防护
+- ✅ **精确广告过滤**：使用category-ads-all阻断广告域名
 
 ### 防偷跑功能
 - ✅ **完全保持V2bX功能**：用户管理、流量统计、动态更新
@@ -294,7 +292,9 @@ route.json → 直接作为 Xray 的 routing 配置
 ### 智能功能特性
 
 #### 1. 🚀 完整API集成
+- **多面板支持**：完美支持 Xboard、V2board 等主流面板的API格式
 - **完整REALITY配置获取**：从面板API获取privateKey、shortIds、serverNames、dest、uuid等完整参数
+- **智能字段解析**：支持多种API响应格式和字段命名方式的自动识别
 - **双重解析支持**：Python3优先，grep/sed备用的JSON解析方式
 - **完善错误处理**：API失败时使用安全默认值，详细状态提示
 
@@ -370,21 +370,20 @@ cat /etc/V2bX/custom_inbound.json | jq '.[1].streamSettings.realitySettings | ke
 ### 威胁防护覆盖
 | 威胁类型 | 优化前 | 优化后 | 说明 |
 |----------|--------|--------|------|
-| 恶意软件 | 部分静态列表 | ✅ 完整动态库 | geosite自动更新 |
-| 钓鱼网站 | 部分静态列表 | ✅ 完整动态库 | 覆盖更全面 |
-| 挖矿网站 | ❌ 缺失 | ✅ 新增 | 现代威胁防护 |
+| 广告域名 | 部分静态列表 | ✅ 完整动态库 | geosite自动更新 |
 | BT协议 | ✅ 覆盖 | ✅ 保留 | 协议级阻断 |
 | 私有IP | ✅ 覆盖 | ✅ 优化 | 更完整的IP段 |
+| 性能优化 | ❌ 高CPU占用 | ✅ 大幅提升 | 规则数量减少96% |
 
 ## �️ 验证和测试
 
 ### 检查路由规则优化
 ```bash
 # 检查新的路由规则
-cat /etc/V2bX/route.json | grep -E "(geosite|malware|phishing|cryptominers)"
+cat /etc/V2bX/route.json | grep -E "(geosite|category-ads-all)"
 
 # 检查Sing-box配置（如使用）
-cat /etc/V2bX/sing_origin.json | grep -E "(geosite|malware|phishing|cryptominers)"
+cat /etc/V2bX/sing_origin.json | grep -E "(geosite|category-ads-all)"
 
 # 验证服务状态
 systemctl status V2bX
@@ -397,6 +396,84 @@ curl -H "Host: www.cityline.com" https://your-server:443
 
 # 测试非法请求（应该被阻断）
 curl -H "Host: evil.com" https://your-server:443
+```
+
+## 🎯 Xboard 面板配置指南
+
+### 📋 Xboard 节点配置步骤
+
+#### 1. 创建 VLESS+REALITY 节点
+```
+协议：VLESS
+传输：TCP
+安全：REALITY
+端口：443（推荐）或其他端口
+```
+
+#### 2. REALITY 安全设置
+```
+目标网站：speed.cloudflare.com（或其他可信HTTPS网站）
+服务器名称：speed.cloudflare.com（与目标网站一致）
+私钥：在面板中生成或使用命令生成
+公钥：与私钥配对，用于客户端配置
+短ID：留空或设置随机16进制字符串
+```
+
+#### 3. 生成 REALITY 密钥对
+在服务器上执行：
+```bash
+# 方法1：使用V2bX内置功能
+bash V2bX.sh x25519
+
+# 方法2：使用Xray命令
+xray x25519
+
+# 方法3：使用在线工具
+# 访问面板的REALITY密钥生成功能
+```
+
+### 🔍 API 字段映射说明
+
+#### Xboard API 响应格式
+脚本会自动识别以下字段结构：
+```json
+{
+  "settings": {
+    "clients": [{"uuid": "用户UUID"}]
+  },
+  "realitySettings": {
+    "privateKey": "服务端私钥",
+    "serverNames": ["服务器名称列表"],
+    "shortIds": ["短ID列表"],
+    "dest": "目标地址:端口"
+  }
+}
+```
+
+#### 支持的字段名变体
+- **UUID字段**：`uuid`, `id`, `user_id`, `client_id`
+- **私钥字段**：`privateKey`, `private_key`, `key`, `private`
+- **配置位置**：`settings.clients[]`, `users[]`, `clients[]`, 顶级字段
+
+### ✅ 配置验证方法
+
+#### 使用 API 测试工具
+```bash
+# 运行 Xboard API 解析测试
+chmod +x test-xboard-api.sh
+bash test-xboard-api.sh
+
+# 按提示输入面板信息，自动测试API解析功能
+```
+
+#### 手动验证命令
+```bash
+# 检查API响应
+curl -s "https://your-panel.com/api/v1/server/UniProxy/config?token=your-api-key&node_id=1&node_type=vless" | jq .
+
+# 验证生成的配置
+cat /etc/V2bX/custom_inbound.json | jq '.[1].settings.clients[0].id'
+cat /etc/V2bX/custom_inbound.json | jq '.[1].streamSettings.realitySettings.privateKey'
 ```
 
 ## 🔧 UUID配置问题排除
@@ -430,16 +507,39 @@ fi
 
 ## 📞 故障排除
 
+### Geosite配置问题
+如果遇到类似错误：`list not found in geosite.dat: MALWARE`
+
+**原因**：使用了不存在的geosite列表名称
+
+**解决方案**：
+```bash
+# 运行geosite配置测试
+bash test-geosite-config.sh
+
+# 检查geosite数据库文件
+ls -la /etc/V2bX/geosite.dat
+
+# 验证使用的geosite列表名称
+grep -o 'geosite:[^"]*' /etc/V2bX/route.json
+```
+
+**常用的有效geosite列表**：
+- `geosite:category-ads-all` - 广告域名
+- `geosite:cn` - 中国域名
+- `geosite:google` - Google服务
+- `geosite:facebook` - Facebook服务
+
 ### 路由规则问题
 ```bash
-# 检查geosite数据库
-ls -la /usr/local/share/xray/geosite.dat
-
 # 测试配置语法
 /usr/local/V2bX/V2bX test -config /etc/V2bX/config.json
 
 # 查看详细日志
 journalctl -u V2bX -f
+
+# 重启服务
+systemctl restart V2bX
 ```
 
 ### API 连接失败

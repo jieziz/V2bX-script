@@ -387,7 +387,7 @@ EOF
 ]
 EOF
     
-    # 创建 route.json 文件 - 精简版（只保留3个核心安全规则）
+    # 创建 route.json 文件 - 精简版（只保留核心安全规则）
     cat <<EOF > /etc/V2bX/route.json
 {
     "domainStrategy": "IPIfNonMatch",
@@ -396,9 +396,7 @@ EOF
             "type": "field",
             "outboundTag": "block",
             "domain": [
-                "geosite:malware",
-                "geosite:phishing",
-                "geosite:cryptominers"
+                "geosite:category-ads-all"
             ]
         },
         {
@@ -460,9 +458,7 @@ EOF
     "rules": [
       {
         "geosite": [
-          "malware",
-          "phishing",
-          "cryptominers"
+          "category-ads-all"
         ],
         "outbound": "block"
       },
@@ -628,56 +624,116 @@ try:
     # 基本配置
     server_port = data.get('server_port', 443)
 
-    # REALITY配置 - 尝试多种可能的字段名
-    reality_settings = data.get('reality_settings', {}) or data.get('realitySettings', {})
-    tls_settings = data.get('tls_settings', {}) or data.get('tlsSettings', {})
-    stream_settings = data.get('stream_settings', {}) or data.get('streamSettings', {})
+    # REALITY配置 - 尝试多种可能的字段名和嵌套结构
+    # 支持 Xboard/V2board 等不同面板的API格式
+    reality_settings = (data.get('reality_settings', {}) or
+                       data.get('realitySettings', {}) or
+                       data.get('reality', {}) or {})
 
-    # 提取REALITY参数
+    tls_settings = (data.get('tls_settings', {}) or
+                   data.get('tlsSettings', {}) or
+                   data.get('tls', {}) or {})
+
+    stream_settings = (data.get('stream_settings', {}) or
+                      data.get('streamSettings', {}) or
+                      data.get('stream', {}) or {})
+
+    # 检查嵌套的 realitySettings
+    if stream_settings and 'realitySettings' in stream_settings:
+        reality_settings = stream_settings['realitySettings']
+    elif stream_settings and 'reality_settings' in stream_settings:
+        reality_settings = stream_settings['reality_settings']
+
+    # 提取REALITY参数 - 支持更多字段名变体
     server_name = (reality_settings.get('server_name') or
                   reality_settings.get('serverName') or
+                  reality_settings.get('sni') or
                   tls_settings.get('server_name') or
                   tls_settings.get('serverName') or
+                  tls_settings.get('sni') or
+                  data.get('sni') or
                   'speed.cloudflare.com')
 
     dest = (reality_settings.get('dest') or
            reality_settings.get('destination') or
+           reality_settings.get('target') or
            f'{server_name}:443')
 
+    # 私钥获取 - 支持多种字段名
     private_key = (reality_settings.get('private_key') or
                   reality_settings.get('privateKey') or
-                  reality_settings.get('key') or '')
+                  reality_settings.get('key') or
+                  reality_settings.get('private') or
+                  data.get('private_key') or
+                  data.get('privateKey') or '')
 
+    # 短ID获取 - 支持多种格式
     short_ids = (reality_settings.get('short_ids') or
                 reality_settings.get('shortIds') or
                 reality_settings.get('shortId') or
+                reality_settings.get('short_id') or
+                data.get('short_ids') or
+                data.get('shortIds') or
                 ['', '0123456789abcdef'])
 
+    # 服务器名称列表
     server_names = (reality_settings.get('server_names') or
                    reality_settings.get('serverNames') or
+                   reality_settings.get('sni_list') or
+                   data.get('server_names') or
+                   data.get('serverNames') or
                    [server_name])
 
-    # 用户配置 - 尝试多种可能的字段名和结构
+    # 用户配置 - 支持 Xboard/V2board 等不同面板的UUID字段格式
     uuid = ''
 
-    # 尝试不同的UUID字段位置
-    if 'users' in data and data['users']:
-        uuid = data['users'][0].get('uuid', '') or data['users'][0].get('id', '')
-    elif 'clients' in data and data['clients']:
-        uuid = data['clients'][0].get('uuid', '') or data['clients'][0].get('id', '')
-    elif 'user' in data:
-        uuid = data['user'].get('uuid', '') or data['user'].get('id', '')
-    elif 'client' in data:
-        uuid = data['client'].get('uuid', '') or data['client'].get('id', '')
-    elif 'uuid' in data:
-        uuid = data['uuid']
-    elif 'id' in data:
-        uuid = data['id']
+    # 尝试不同的UUID字段位置和命名方式
+    # 1. 检查 settings.clients 结构（Xboard常用）
+    if 'settings' in data and isinstance(data['settings'], dict):
+        settings = data['settings']
+        if 'clients' in settings and isinstance(settings['clients'], list) and settings['clients']:
+            client = settings['clients'][0]
+            uuid = client.get('uuid', '') or client.get('id', '') or client.get('user_id', '')
+        elif 'users' in settings and isinstance(settings['users'], list) and settings['users']:
+            user = settings['users'][0]
+            uuid = user.get('uuid', '') or user.get('id', '') or user.get('user_id', '')
 
-    # 如果仍然没有UUID，生成一个随机UUID
+    # 2. 检查顶级 users/clients 数组
+    if not uuid and 'users' in data and isinstance(data['users'], list) and data['users']:
+        user = data['users'][0]
+        uuid = user.get('uuid', '') or user.get('id', '') or user.get('user_id', '')
+    elif not uuid and 'clients' in data and isinstance(data['clients'], list) and data['clients']:
+        client = data['clients'][0]
+        uuid = client.get('uuid', '') or client.get('id', '') or client.get('user_id', '')
+
+    # 3. 检查单个用户对象
+    if not uuid and 'user' in data and isinstance(data['user'], dict):
+        user = data['user']
+        uuid = user.get('uuid', '') or user.get('id', '') or user.get('user_id', '')
+    elif not uuid and 'client' in data and isinstance(data['client'], dict):
+        client = data['client']
+        uuid = client.get('uuid', '') or client.get('id', '') or client.get('user_id', '')
+
+    # 4. 检查顶级字段
+    if not uuid:
+        uuid = (data.get('uuid', '') or
+               data.get('id', '') or
+               data.get('user_id', '') or
+               data.get('client_id', ''))
+
+    # 5. 如果仍然没有UUID，生成一个随机UUID
     if not uuid:
         uuid = str(uuid_module.uuid4())
-        print(f'# 生成随机UUID: {uuid}', file=sys.stderr)
+        print(f'# 警告：未从API获取到UUID，已生成随机UUID: {uuid}', file=sys.stderr)
+    else:
+        print(f'# 成功从API获取UUID: {uuid}', file=sys.stderr)
+
+    # 输出解析状态信息
+    print(f'# REALITY配置解析状态：', file=sys.stderr)
+    print(f'#   私钥状态: {\"已获取\" if private_key else \"未获取（将使用占位符）\"}', file=sys.stderr)
+    print(f'#   UUID状态: {\"已获取\" if uuid else \"未获取\"}', file=sys.stderr)
+    print(f'#   服务器名称: {server_name}', file=sys.stderr)
+    print(f'#   目标地址: {dest}', file=sys.stderr)
 
     # 输出shell变量
     print(f'server_port={server_port}')
@@ -808,7 +864,7 @@ except Exception as e:
                 \"realitySettings\": {
                     \"dest\": \"${dest}\",
                     \"serverNames\": ${server_names_json},
-                    \"privateKey\": \"${private_key}\",
+                    \"privateKey\": \"${private_key:-your-private-key-from-panel}\",
                     \"shortIds\": ${short_ids_json}
                 }
             },
@@ -829,7 +885,7 @@ except Exception as e:
             echo -e "  - 服务器名：$server_name"
             echo -e "  - UUID：${uuid:0:8}..."
             echo -e "  - 目标地址：$dest"
-            echo -e "  - 私钥状态：$([ -n "$private_key" ] && [ "$private_key" != "your-private-key-here" ] && echo "已配置" || echo "需要配置")"
+            echo -e "  - 私钥状态：$([ -n "$private_key" ] && [ "$private_key" != "your-private-key-from-panel" ] && echo "✅ 已从API获取" || echo "⚠️  需要手动配置")"
 
             # 添加防偷跑路由规则（使用所有server_names）
             for server_name_item in "${server_names_array[@]}"; do
@@ -870,6 +926,25 @@ except Exception as e:
     echo -e "  - 请确保面板中已正确配置REALITY参数"
     echo -e "  - 如果私钥显示'需要配置'，请在面板中生成REALITY密钥"
     echo -e "  - 重启V2bX后防偷跑功能即可生效"
+    echo ""
+    echo -e "${yellow}=== Xboard 面板配置指南 ===${plain}"
+    echo -e "${green}1. 节点配置：${plain}"
+    echo -e "  - 协议：VLESS"
+    echo -e "  - 传输：TCP"
+    echo -e "  - 安全：REALITY"
+    echo -e "  - 端口：443（或其他端口）"
+    echo ""
+    echo -e "${green}2. REALITY 设置：${plain}"
+    echo -e "  - 目标网站：选择可信的HTTPS网站（如 speed.cloudflare.com）"
+    echo -e "  - 服务器名称：与目标网站一致"
+    echo -e "  - 私钥/公钥：在面板中生成或使用 xray x25519 命令生成"
+    echo -e "  - 短ID：留空或设置为随机16进制字符串"
+    echo ""
+    echo -e "${green}3. API 字段映射：${plain}"
+    echo -e "  - privateKey: reality_settings.privateKey 或 realitySettings.privateKey"
+    echo -e "  - UUID: settings.clients[0].uuid 或 users[0].uuid"
+    echo -e "  - serverNames: reality_settings.serverNames"
+    echo -e "  - shortIds: reality_settings.shortIds"
 }
 
 # 添加防偷跑路由规则

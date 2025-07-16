@@ -1,4 +1,6 @@
 {
+    "_comment": "V2bX REALITY 防偷跑配置示例 - 支持 Xboard/V2board 面板",
+    "_description": "此配置通过双入站架构实现REALITY防偷跑，所有参数从面板API自动获取",
     "log": {
         "loglevel": "debug"
     },
@@ -28,6 +30,7 @@
             "settings": {
                 "clients": [
                     {
+                        "_comment": "UUID从面板API自动获取: settings.clients[0].uuid 或 users[0].uuid",
                         "id": "12345678-1234-1234-1234-123456789abc"
                     }
                 ],
@@ -37,11 +40,14 @@
                 "network": "tcp",
                 "security": "reality",
                 "realitySettings": {
+                    "_comment": "REALITY配置从面板API自动获取",
                     "dest": "speed.cloudflare.com:443",
                     "serverNames": [
                         "speed.cloudflare.com"
                     ],
+                    "_privateKey_source": "API字段: realitySettings.privateKey 或 reality_settings.private_key",
                     "privateKey": "your-private-key-from-panel",
+                    "_shortIds_source": "API字段: realitySettings.shortIds 或 reality_settings.short_ids",
                     "shortIds": [
                         "",
                         "0123456789abcdef"
