@@ -1,20 +1,18 @@
 {
-    "_comment": "V2bX REALITY 防偷跑配置示例 - 支持 Xboard/V2board 面板",
-    "_description": "此配置通过双入站架构实现REALITY防偷跑，所有参数从面板API自动获取",
     "log": {
         "loglevel": "debug"
     },
     "inbounds": [
         {
-            "tag": "dokodemo-antisteal-33",
+            "tag": "dokodemo-in",
             "port": 443,
             "protocol": "dokodemo-door",
             "settings": {
                 "address": "::1",
-                "port": 4431,
+                "port": 4431,  // 指向内网中的 reality 端口，示例是这个端口，如果要自己修改了记得这里和下面的 reality 入站都要修改
                 "network": "tcp"
             },
-            "sniffing": {
+            "sniffing": { // 这里的 sniffing 不是多余的，别乱动
                 "enabled": true,
                 "destOverride": [
                     "tls"
@@ -23,15 +21,13 @@
             }
         },
         {
-            "tag": "vless-reality-antisteal-33",
             "listen": "::1",
-            "port": 4431,
+            "port": 4431, // 见上 如果和其他服务冲突了可以换
             "protocol": "vless",
             "settings": {
                 "clients": [
                     {
-                        "_comment": "UUID从面板API自动获取: settings.clients[0].uuid 或 users[0].uuid",
-                        "id": "12345678-1234-1234-1234-123456789abc"
+                        "id": "" // uuid
                     }
                 ],
                 "decryption": "none"
@@ -40,14 +36,13 @@
                 "network": "tcp",
                 "security": "reality",
                 "realitySettings": {
-                    "_comment": "REALITY配置从面板API自动获取",
+                    // 下方要求和普通 reality 一致，这里演示 dest 设置为 cloudflare 不被偷跑流量所以设置为 speed.cloudflare.com 了
+                    // 你可以设置为其他 CF 网站，如果你的 dest 不是这种网站你也不用点了进来不是吗
                     "dest": "speed.cloudflare.com:443",
                     "serverNames": [
                         "speed.cloudflare.com"
                     ],
-                    "_privateKey_source": "API字段: realitySettings.privateKey 或 reality_settings.private_key",
-                    "privateKey": "your-private-key-from-panel",
-                    "_shortIds_source": "API字段: realitySettings.shortIds 或 reality_settings.short_ids",
+                    "privateKey": "", // 运行 `xray x25519` 生成
                     "shortIds": [
                         "",
                         "0123456789abcdef"
@@ -78,19 +73,18 @@
     "routing": {
         "rules": [
             {
-                "type": "field",
                 "inboundTag": [
-                    "dokodemo-antisteal-33"
+                    "dokodemo-in"
                 ],
+                // 重要，这个域名列表需要和 realitySettings 的 serverNames 保持一致
                 "domain": [
                     "speed.cloudflare.com"
                 ],
                 "outboundTag": "direct"
             },
             {
-                "type": "field",
                 "inboundTag": [
-                    "dokodemo-antisteal-33"
+                    "dokodemo-in"
                 ],
                 "outboundTag": "block"
             }

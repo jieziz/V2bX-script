@@ -580,10 +580,14 @@ EOF
         echo -e "${yellow}正在获取节点 $node_id 的配置信息...${plain}"
 
         # 从API获取完整的REALITY节点配置
-        echo -e "${yellow}正在获取完整的REALITY配置...${plain}"
+        echo -e "${yellow}正在获取节点配置...${plain}"
         local node_response=$(curl -s "${api_host}/api/v1/server/UniProxy/config?token=${api_key}&node_id=${node_id}&node_type=vless" --connect-timeout 30 2>/dev/null)
 
-        if [ $? -eq 0 ] && [ -n "$node_response" ]; then
+        # 获取用户列表（防偷跑配置需要硬编码UUID）
+        echo -e "${yellow}正在获取用户列表...${plain}"
+        local user_response=$(curl -s "${api_host}/api/v1/server/UniProxy/user?token=${api_key}&node_id=${node_id}&node_type=vless" --connect-timeout 30 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ -n "$node_response" ] && [ -n "$user_response" ]; then
             # 调试：显示API响应结构（仅显示字段名，不显示敏感值）
             echo -e "${yellow}API响应字段：${plain}"
             if command -v python3 >/dev/null 2>&1; then
@@ -615,11 +619,17 @@ except:
             local server_names=""
 
             if command -v python3 >/dev/null 2>&1; then
-                # 使用Python解析JSON获取完整REALITY配置
-                eval $(echo "$node_response" | python3 -c "
+                # 使用Python解析JSON获取完整REALITY配置和用户信息
+                eval $(echo "$node_response" "$user_response" | python3 -c "
 import sys, json, uuid as uuid_module
 try:
-    data = json.load(sys.stdin)
+    # 读取两个API响应：节点配置和用户列表
+    input_lines = sys.stdin.read().strip().split('\n')
+    node_data = json.loads(input_lines[0]) if len(input_lines) > 0 else {}
+    user_data = json.loads(input_lines[1]) if len(input_lines) > 1 else {}
+
+    # 使用节点配置数据作为主数据
+    data = node_data
 
     # 基本配置
     server_port = data.get('server_port', 443)
@@ -644,89 +654,32 @@ try:
     elif stream_settings and 'reality_settings' in stream_settings:
         reality_settings = stream_settings['reality_settings']
 
-    # 提取REALITY参数 - 支持更多字段名变体
-    server_name = (reality_settings.get('server_name') or
-                  reality_settings.get('serverName') or
-                  reality_settings.get('sni') or
-                  tls_settings.get('server_name') or
-                  tls_settings.get('serverName') or
-                  tls_settings.get('sni') or
-                  data.get('sni') or
-                  'speed.cloudflare.com')
+    # 提取REALITY参数 - 简化字段获取逻辑
+    server_name = tls_settings.get('server_name', 'speed.cloudflare.com')
+    private_key = tls_settings.get('private_key', '')
 
-    dest = (reality_settings.get('dest') or
-           reality_settings.get('destination') or
-           reality_settings.get('target') or
-           f'{server_name}:443')
+    # dest 字段：server_name + 端口443
+    dest = f'{server_name}:443'
 
-    # 私钥获取 - 支持多种字段名
-    private_key = (reality_settings.get('private_key') or
-                  reality_settings.get('privateKey') or
-                  reality_settings.get('key') or
-                  reality_settings.get('private') or
-                  data.get('private_key') or
-                  data.get('privateKey') or '')
+    # 短ID配置 - 防偷跑配置使用固定格式
+    short_ids = ['', '0123456789abcdef']
 
-    # 短ID获取 - 支持多种格式
-    short_ids = (reality_settings.get('short_ids') or
-                reality_settings.get('shortIds') or
-                reality_settings.get('shortId') or
-                reality_settings.get('short_id') or
-                data.get('short_ids') or
-                data.get('shortIds') or
-                ['', '0123456789abcdef'])
+    # 服务器名称列表 - 简化为单个服务器名称
+    server_names = [server_name]
 
-    # 服务器名称列表
-    server_names = (reality_settings.get('server_names') or
-                   reality_settings.get('serverNames') or
-                   reality_settings.get('sni_list') or
-                   data.get('server_names') or
-                   data.get('serverNames') or
-                   [server_name])
-
-    # 用户配置 - 支持 Xboard/V2board 等不同面板的UUID字段格式
+    # 用户UUID获取 - 优先从用户API获取
     uuid = ''
 
-    # 尝试不同的UUID字段位置和命名方式
-    # 1. 检查 settings.clients 结构（Xboard常用）
-    if 'settings' in data and isinstance(data['settings'], dict):
-        settings = data['settings']
-        if 'clients' in settings and isinstance(settings['clients'], list) and settings['clients']:
-            client = settings['clients'][0]
-            uuid = client.get('uuid', '') or client.get('id', '') or client.get('user_id', '')
-        elif 'users' in settings and isinstance(settings['users'], list) and settings['users']:
-            user = settings['users'][0]
-            uuid = user.get('uuid', '') or user.get('id', '') or user.get('user_id', '')
+    # 1. 优先从用户API获取UUID
+    if 'users' in user_data and isinstance(user_data['users'], list) and user_data['users']:
+        user = user_data['users'][0]
+        uuid = user.get('uuid', '') or user.get('id', '')
+        print(f'# 从用户API获取UUID: {uuid}', file=sys.stderr)
 
-    # 2. 检查顶级 users/clients 数组
-    if not uuid and 'users' in data and isinstance(data['users'], list) and data['users']:
-        user = data['users'][0]
-        uuid = user.get('uuid', '') or user.get('id', '') or user.get('user_id', '')
-    elif not uuid and 'clients' in data and isinstance(data['clients'], list) and data['clients']:
-        client = data['clients'][0]
-        uuid = client.get('uuid', '') or client.get('id', '') or client.get('user_id', '')
-
-    # 3. 检查单个用户对象
-    if not uuid and 'user' in data and isinstance(data['user'], dict):
-        user = data['user']
-        uuid = user.get('uuid', '') or user.get('id', '') or user.get('user_id', '')
-    elif not uuid and 'client' in data and isinstance(data['client'], dict):
-        client = data['client']
-        uuid = client.get('uuid', '') or client.get('id', '') or client.get('user_id', '')
-
-    # 4. 检查顶级字段
-    if not uuid:
-        uuid = (data.get('uuid', '') or
-               data.get('id', '') or
-               data.get('user_id', '') or
-               data.get('client_id', ''))
-
-    # 5. 如果仍然没有UUID，生成一个随机UUID
+    # 2. 如果用户API没有返回UUID，生成随机UUID
     if not uuid:
         uuid = str(uuid_module.uuid4())
-        print(f'# 警告：未从API获取到UUID，已生成随机UUID: {uuid}', file=sys.stderr)
-    else:
-        print(f'# 成功从API获取UUID: {uuid}', file=sys.stderr)
+        print(f'# 警告：用户API未返回UUID，已生成随机UUID: {uuid}', file=sys.stderr)
 
     # 输出解析状态信息
     print(f'# REALITY配置解析状态：', file=sys.stderr)
@@ -773,10 +726,11 @@ except Exception as e:
                 server_port=$(echo "$node_response" | grep -o '"server_port":[0-9]*' | cut -d':' -f2 | head -1)
                 server_name=$(echo "$node_response" | grep -o '"server_name":"[^"]*"' | cut -d'"' -f4 | head -1)
 
-                # 尝试多种UUID字段名
-                uuid=$(echo "$node_response" | grep -o '"uuid":"[^"]*"' | cut -d'"' -f4 | head -1)
+                # 优先从用户API获取UUID
+                uuid=$(echo "$user_response" | grep -o '"uuid":"[^"]*"' | cut -d'"' -f4 | head -1)
                 if [ -z "$uuid" ]; then
-                    uuid=$(echo "$node_response" | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | head -1)
+                    # 备用：从用户API的id字段获取
+                    uuid=$(echo "$user_response" | grep -o '"id":[0-9]*' | cut -d':' -f2 | head -1)
                 fi
 
                 # 设置默认值
@@ -802,8 +756,51 @@ except Exception as e:
             fi
 
             if [ -z "$private_key" ]; then
-                echo -e "${yellow}警告：未获取到REALITY私钥，将使用示例密钥${plain}"
-                private_key="your-private-key-here"
+                echo -e "${yellow}警告：未从API获取到REALITY私钥，正在自动生成...${plain}"
+
+                # 尝试使用 V2bX 生成 x25519 私钥
+                if command -v /usr/local/V2bX/V2bX >/dev/null 2>&1; then
+                    echo -e "${green}使用 V2bX 生成 x25519 密钥对...${plain}"
+                    key_output=$(/usr/local/V2bX/V2bX x25519 2>/dev/null)
+                    private_key=$(echo "$key_output" | grep "Private key:" | cut -d' ' -f3)
+                    public_key=$(echo "$key_output" | grep "Public key:" | cut -d' ' -f3)
+
+                    if [ -n "$private_key" ] && [ -n "$public_key" ]; then
+                        echo -e "${green}✅ 成功生成 REALITY 密钥对${plain}"
+                        echo -e "  - 私钥: ${private_key:0:16}..."
+                        echo -e "  - 公钥: ${public_key:0:16}..."
+                        echo -e "${yellow}请将公钥配置到客户端: $public_key${plain}"
+                    else
+                        echo -e "${red}V2bX x25519 生成失败，尝试其他方法...${plain}"
+                        private_key=""
+                    fi
+                fi
+
+                # 备用方法：使用 xray 生成（如果 V2bX 失败）
+                if [ -z "$private_key" ] && command -v xray >/dev/null 2>&1; then
+                    echo -e "${green}使用 xray 生成 x25519 密钥对...${plain}"
+                    key_output=$(xray x25519 2>/dev/null)
+                    private_key=$(echo "$key_output" | grep "Private key:" | cut -d' ' -f3)
+                    public_key=$(echo "$key_output" | grep "Public key:" | cut -d' ' -f3)
+
+                    if [ -n "$private_key" ] && [ -n "$public_key" ]; then
+                        echo -e "${green}✅ 成功生成 REALITY 密钥对${plain}"
+                        echo -e "  - 私钥: ${private_key:0:16}..."
+                        echo -e "  - 公钥: ${public_key:0:16}..."
+                        echo -e "${yellow}请将公钥配置到客户端: $public_key${plain}"
+                    else
+                        echo -e "${red}xray x25519 生成失败${plain}"
+                        private_key=""
+                    fi
+                fi
+
+                # 最后的备用方案
+                if [ -z "$private_key" ]; then
+                    echo -e "${red}❌ 无法自动生成私钥，请手动配置${plain}"
+                    echo -e "${yellow}请运行以下命令生成密钥对：${plain}"
+                    echo -e "  V2bX x25519  或  xray x25519"
+                    private_key="your-private-key-here"
+                fi
             fi
 
             # 生成short_ids JSON数组
@@ -892,7 +889,13 @@ except Exception as e:
                 add_antisteal_routing_rules "$node_id" "$server_name_item"
             done
         else
-            echo -e "${red}获取节点 $node_id 配置失败，跳过防偷跑配置${plain}"
+            echo -e "${red}获取节点 $node_id 配置或用户信息失败，跳过防偷跑配置${plain}"
+            if [ -z "$node_response" ]; then
+                echo -e "${red}  - 节点配置API调用失败${plain}"
+            fi
+            if [ -z "$user_response" ]; then
+                echo -e "${red}  - 用户列表API调用失败${plain}"
+            fi
         fi
     done
 
